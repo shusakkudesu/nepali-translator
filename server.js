@@ -3,7 +3,6 @@ const cheerio = require("cheerio");
 const axios = require("axios");
 const path = require("path");
 const crypto = require("crypto");
-const puppeteer = require("puppeteer");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,35 +20,13 @@ function storePage(html) {
   return id;
 }
 
-// Serve translated page directly (not as blob)
+// Serve translated page directly
 app.get("/view/:id", (req, res) => {
   const html = translatedPages.get(req.params.id);
   if (!html) return res.status(404).send("Page expired or not found");
   res.set("Content-Type", "text/html; charset=utf-8");
   res.send(html);
 });
-
-// Reusable browser instance
-let browserInstance = null;
-
-async function getBrowser() {
-  if (!browserInstance || !browserInstance.connected) {
-    const launchOptions = {
-      headless: "new",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-web-security",
-        "--disable-dev-shm-usage",
-      ],
-    };
-    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-      launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-    }
-    browserInstance = await puppeteer.launch(launchOptions);
-  }
-  return browserInstance;
-}
 
 // Google Translate (free endpoint)
 async function translateText(text, targetLang = "ne") {
@@ -67,7 +44,7 @@ async function translateText(text, targetLang = "ne") {
   }
 }
 
-// Batch translate with concurrency control
+// Batch translate
 async function batchTranslate(texts, targetLang = "ne") {
   const BATCH_SIZE = 30;
   const results = new Array(texts.length);
@@ -88,7 +65,7 @@ async function batchTranslate(texts, targetLang = "ne") {
 // Make relative URLs absolute
 function makeAbsolute(href, baseUrl) {
   if (!href) return href;
-  if (href.startsWith("data:") || href.startsWith("javascript:") || href.startsWith("#")) return href;
+  if (href.startsWith("data:") || href.startsWith("javascript:") || href.startsWith("#") || href.startsWith("blob:")) return href;
   try {
     return new URL(href, baseUrl).href;
   } catch {
@@ -96,7 +73,7 @@ function makeAbsolute(href, baseUrl) {
   }
 }
 
-// Image proxy endpoint
+// Image proxy
 app.get("/api/proxy-image", async (req, res) => {
   const imageUrl = req.query.url;
   if (!imageUrl) return res.status(400).send("Missing url param");
@@ -106,8 +83,7 @@ app.get("/api/proxy-image", async (req, res) => {
       responseType: "arraybuffer",
       timeout: 15000,
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         Referer: new URL(imageUrl).origin + "/",
         Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
       },
@@ -118,12 +94,12 @@ app.get("/api/proxy-image", async (req, res) => {
     res.set("Content-Type", contentType);
     res.set("Cache-Control", "public, max-age=86400");
     res.send(Buffer.from(response.data));
-  } catch (err) {
+  } catch {
     res.status(502).send("Failed to fetch image");
   }
 });
 
-// General resource proxy (for CSS, JS, etc.)
+// General resource proxy (CSS, JS, etc.)
 app.get("/api/proxy", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).send("Missing url param");
@@ -133,8 +109,7 @@ app.get("/api/proxy", async (req, res) => {
       responseType: "arraybuffer",
       timeout: 15000,
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         Referer: new URL(targetUrl).origin + "/",
       },
       maxRedirects: 5,
@@ -143,8 +118,9 @@ app.get("/api/proxy", async (req, res) => {
     const contentType = response.headers["content-type"] || "application/octet-stream";
     res.set("Content-Type", contentType);
     res.set("Cache-Control", "public, max-age=86400");
+    res.set("Access-Control-Allow-Origin", "*");
     res.send(Buffer.from(response.data));
-  } catch (err) {
+  } catch {
     res.status(502).send("Failed to fetch resource");
   }
 });
@@ -156,58 +132,27 @@ app.post("/api/translate", async (req, res) => {
     return res.status(400).json({ error: "URL is required" });
   }
 
-  let page = null;
   const proto = req.get("x-forwarded-proto") || req.protocol;
   const serverOrigin = `${proto}://${req.get("host")}`;
 
   try {
-    console.log(`[1/4] Launching browser for: ${siteUrl}`);
-    const browser = await getBrowser();
-    page = await browser.newPage();
-
-    await page.setViewport({ width: 1280, height: 900 });
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    );
-
-    await page.goto(siteUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 120000,
+    console.log(`[1/3] Fetching: ${siteUrl}`);
+    const response = await axios.get(siteUrl, {
+      timeout: 30000,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      maxRedirects: 5,
     });
 
-    await new Promise((r) => setTimeout(r, 3000));
-
-    // Scroll to trigger lazy-loaded images
-    console.log("[2/4] Scrolling to load lazy images...");
-    await page.evaluate(async () => {
-      const distance = 600;
-      const delay = 150;
-      const maxScrolls = 15;
-      let scrolls = 0;
-
-      while (
-        scrolls < maxScrolls &&
-        document.scrollingElement.scrollTop + window.innerHeight <
-          document.scrollingElement.scrollHeight
-      ) {
-        document.scrollingElement.scrollBy(0, distance);
-        await new Promise((r) => setTimeout(r, delay));
-        scrolls++;
-      }
-      document.scrollingElement.scrollTo(0, 0);
-    });
-
-    await new Promise((r) => setTimeout(r, 1500));
-
-    const renderedHtml = await page.content();
-    await page.close();
-    page = null;
-
-    console.log("[3/4] Translating text to Nepali...");
-    const $ = cheerio.load(renderedHtml);
+    const html = response.data;
+    const $ = cheerio.load(html);
     const baseUrl = siteUrl;
 
-    // Proxy external scripts (keep them working)
+    console.log("[2/3] Rewriting URLs and translating...");
+
+    // Proxy external scripts
     $("script[src]").each((_, el) => {
       const src = $(el).attr("src");
       if (src) {
@@ -218,7 +163,7 @@ app.post("/api/translate", async (req, res) => {
       }
     });
 
-    // Proxy CSS links
+    // Proxy CSS
     $("link[rel='stylesheet'][href], link[type='text/css'][href]").each((_, el) => {
       const href = $(el).attr("href");
       if (href) {
@@ -229,7 +174,7 @@ app.post("/api/translate", async (req, res) => {
       }
     });
 
-    // Other link tags (favicon etc.) - make absolute
+    // Other link tags - make absolute
     $("link:not([rel='stylesheet']):not([type='text/css'])").each((_, el) => {
       const href = $(el).attr("href");
       if (href) {
@@ -237,39 +182,57 @@ app.post("/api/translate", async (req, res) => {
       }
     });
 
-    // Proxy all images
+    // Proxy images + handle lazy load attributes
     $("img").each((_, el) => {
-      const src = $(el).attr("src");
-      if (src) {
-        const absoluteSrc = makeAbsolute(src, baseUrl);
-        if (absoluteSrc && !absoluteSrc.startsWith("data:")) {
-          $(el).attr("src", `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absoluteSrc)}`);
+      // Handle all possible image source attributes
+      const imgAttrs = ["src", "data-src", "data-original", "data-lazy-src", "data-echo"];
+      let bestSrc = null;
+
+      for (const attr of imgAttrs) {
+        const val = $(el).attr(attr);
+        if (val && !val.startsWith("data:")) {
+          const absVal = makeAbsolute(val, baseUrl);
+          const proxied = `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absVal)}`;
+          $(el).attr(attr, proxied);
+          if (!bestSrc) bestSrc = proxied;
         }
       }
-      const dataSrc = $(el).attr("data-src");
-      if (dataSrc) {
-        const absoluteDataSrc = makeAbsolute(dataSrc, baseUrl);
-        if (absoluteDataSrc && !absoluteDataSrc.startsWith("data:")) {
-          $(el).attr("src", `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absoluteDataSrc)}`);
-          $(el).attr("data-src", `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absoluteDataSrc)}`);
-        }
+
+      // Always set src if we found a source
+      if (bestSrc && !$(el).attr("src")) {
+        $(el).attr("src", bestSrc);
       }
+
+      // Handle srcset
       const srcset = $(el).attr("srcset");
       if (srcset) {
         const newSrcset = srcset.split(",").map((s) => {
           const parts = s.trim().split(/\s+/);
           const absSrc = makeAbsolute(parts[0], baseUrl);
+          if (absSrc.startsWith("data:")) return s;
           parts[0] = `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absSrc)}`;
           return parts.join(" ");
         }).join(", ");
         $(el).attr("srcset", newSrcset);
       }
-      const classes = $(el).attr("class") || "";
-      $(el).attr("class", classes.replace(/\blazy\b/g, "").replace(/\blazyload\b/g, ""));
+
+      // Also handle data-srcset
+      const dataSrcset = $(el).attr("data-srcset");
+      if (dataSrcset) {
+        const newSrcset = dataSrcset.split(",").map((s) => {
+          const parts = s.trim().split(/\s+/);
+          const absSrc = makeAbsolute(parts[0], baseUrl);
+          if (absSrc.startsWith("data:")) return s;
+          parts[0] = `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absSrc)}`;
+          return parts.join(" ");
+        }).join(", ");
+        $(el).attr("data-srcset", newSrcset);
+      }
+
       $(el).attr("loading", "eager");
     });
 
-    // Handle source elements (picture tags)
+    // Handle source elements
     $("source").each((_, el) => {
       const srcset = $(el).attr("srcset");
       if (srcset) {
@@ -300,10 +263,10 @@ app.post("/api/translate", async (req, res) => {
       $(el).attr("href", makeAbsolute($(el).attr("href"), baseUrl));
     });
 
-    // Add base tag for any remaining relative URLs
+    // Add base tag
     $("head").prepend(`<base href="${baseUrl}">`);
 
-    // Collect text nodes to translate (skip script/style)
+    // Collect text nodes to translate
     const skipTags = new Set(["script", "style", "noscript", "code", "pre", "svg", "math"]);
     const textNodes = [];
 
@@ -356,24 +319,15 @@ app.post("/api/translate", async (req, res) => {
 
     $("html").attr("lang", "ne");
 
-    // Store translated HTML and return view URL
     const pageId = storePage($.html());
     const viewUrl = `${serverOrigin}/view/${pageId}`;
 
-    console.log("[4/4] Done!");
+    console.log("[3/3] Done!");
     res.json({ viewUrl });
   } catch (err) {
     console.error("Error:", err.message);
-    if (page) {
-      try { await page.close(); } catch {}
-    }
     res.status(500).json({ error: `Failed to fetch or translate: ${err.message}` });
   }
-});
-
-process.on("SIGINT", async () => {
-  if (browserInstance) await browserInstance.close();
-  process.exit();
 });
 
 app.listen(PORT, () => {
