@@ -114,6 +114,8 @@ app.post("/api/translate", async (req, res) => {
   }
 
   let page = null;
+  const proto = req.get("x-forwarded-proto") || req.protocol;
+  const serverOrigin = `${proto}://${req.get("host")}`;
 
   try {
     console.log(`[1/4] Launching browser for: ${siteUrl}`);
@@ -182,7 +184,7 @@ app.post("/api/translate", async (req, res) => {
         if (absoluteSrc && !absoluteSrc.startsWith("data:")) {
           $(el).attr(
             "src",
-            `/api/proxy-image?url=${encodeURIComponent(absoluteSrc)}`
+            `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absoluteSrc)}`
           );
         }
       }
@@ -193,7 +195,7 @@ app.post("/api/translate", async (req, res) => {
         if (absoluteDataSrc && !absoluteDataSrc.startsWith("data:")) {
           $(el).attr(
             "src",
-            `/api/proxy-image?url=${encodeURIComponent(absoluteDataSrc)}`
+            `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absoluteDataSrc)}`
           );
         }
         $(el).removeAttr("data-src");
@@ -206,7 +208,7 @@ app.post("/api/translate", async (req, res) => {
           .map((s) => {
             const parts = s.trim().split(/\s+/);
             const absSrc = makeAbsolute(parts[0], baseUrl);
-            parts[0] = `/api/proxy-image?url=${encodeURIComponent(absSrc)}`;
+            parts[0] = `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absSrc)}`;
             return parts.join(" ");
           })
           .join(", ");
@@ -232,7 +234,7 @@ app.post("/api/translate", async (req, res) => {
             const parts = s.trim().split(/\s+/);
             const absSrc = makeAbsolute(parts[0], baseUrl);
             if (absSrc.startsWith("data:")) return s;
-            parts[0] = `/api/proxy-image?url=${encodeURIComponent(absSrc)}`;
+            parts[0] = `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absSrc)}`;
             return parts.join(" ");
           })
           .join(", ");
@@ -246,7 +248,7 @@ app.post("/api/translate", async (req, res) => {
       style = style.replace(/url\(['"]?([^'")]+)['"]?\)/g, (match, p1) => {
         if (p1.startsWith("data:")) return match;
         const abs = makeAbsolute(p1, baseUrl);
-        return `url('/api/proxy-image?url=${encodeURIComponent(abs)}')`;
+        return `url('${serverOrigin}/api/proxy-image?url=${encodeURIComponent(abs)}')`;
       });
       $(el).attr("style", style);
     });
