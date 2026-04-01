@@ -341,7 +341,11 @@ app.post("/api/translate", async (req, res) => {
     res.json({ viewUrl });
   } catch (err) {
     console.error("Error:", err.message);
-    res.status(500).json({ error: `Failed to fetch or translate: ${err.message}` });
+    let errorMsg = err.message;
+    if (err.response && err.response.status === 403) {
+      errorMsg = "このサイトはボット対策により翻訳できません（403 Forbidden）。SUUMO、HOME'S等の物件サイトをお試しください。";
+    }
+    res.status(500).json({ error: errorMsg });
   }
 });
 
