@@ -128,16 +128,19 @@ app.post("/api/translate", async (req, res) => {
 
     // Navigate and wait for network to settle
     await page.goto(siteUrl, {
-      waitUntil: "networkidle2",
-      timeout: 30000,
+      waitUntil: "domcontentloaded",
+      timeout: 120000,
     });
+
+    // Wait a bit more for dynamic content
+    await new Promise((r) => setTimeout(r, 3000));
 
     // Scroll down to trigger lazy-loaded images
     console.log("[2/4] Scrolling to load lazy images...");
     await page.evaluate(async () => {
-      const distance = 400;
-      const delay = 200;
-      const maxScrolls = 30;
+      const distance = 600;
+      const delay = 150;
+      const maxScrolls = 15;
       let scrolls = 0;
 
       while (
@@ -149,12 +152,10 @@ app.post("/api/translate", async (req, res) => {
         await new Promise((r) => setTimeout(r, delay));
         scrolls++;
       }
-      // Scroll back to top
       document.scrollingElement.scrollTo(0, 0);
     });
 
-    // Wait a bit for images to finish loading after scroll
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 1500));
 
     // Get the fully rendered HTML
     const renderedHtml = await page.content();
