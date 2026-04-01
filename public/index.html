@@ -252,7 +252,7 @@
         </div>
       </div>
       <div class="preview-frame">
-        <iframe id="previewFrame" sandbox="allow-same-origin allow-scripts"></iframe>
+        <iframe id="previewFrame"></iframe>
       </div>
     </div>
 
@@ -275,7 +275,7 @@
     </div>
 
     <script>
-      let translatedHtmlBlob = null;
+      let translatedViewUrl = null;
 
       const urlInput = document.getElementById("urlInput");
       urlInput.addEventListener("keydown", (e) => {
@@ -315,13 +315,10 @@
             throw new Error(data.error || "Translation failed");
           }
 
-          // Show result in iframe
-          const blob = new Blob([data.html], { type: "text/html" });
-          translatedHtmlBlob = blob;
-          const blobUrl = URL.createObjectURL(blob);
+          translatedViewUrl = data.viewUrl;
 
           const iframe = document.getElementById("previewFrame");
-          iframe.src = blobUrl;
+          iframe.src = translatedViewUrl;
 
           document.getElementById("previewTitle").textContent =
             `翻訳完了: ${siteUrl}`;
@@ -329,7 +326,6 @@
           infoCards.style.display = "none";
           status.innerHTML = "";
 
-          // Scroll to preview
           preview.scrollIntoView({ behavior: "smooth" });
         } catch (err) {
           status.innerHTML = `<div class="error">${err.message}</div>`;
@@ -340,15 +336,14 @@
       }
 
       function openInNewTab() {
-        if (!translatedHtmlBlob) return;
-        const blobUrl = URL.createObjectURL(translatedHtmlBlob);
-        window.open(blobUrl, "_blank");
+        if (!translatedViewUrl) return;
+        window.open(translatedViewUrl, "_blank");
       }
 
       function downloadHtml() {
-        if (!translatedHtmlBlob) return;
+        if (!translatedViewUrl) return;
         const a = document.createElement("a");
-        a.href = URL.createObjectURL(translatedHtmlBlob);
+        a.href = translatedViewUrl;
         a.download = "translated_nepali.html";
         a.click();
       }

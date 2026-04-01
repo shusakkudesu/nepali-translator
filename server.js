@@ -2,6 +2,7 @@ const express = require("express");
 const cheerio = require("cheerio");
 const axios = require("axios");
 const path = require("path");
+const crypto = require("crypto");
 const puppeteer = require("puppeteer");
 
 const app = express();
@@ -9,6 +10,24 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
+
+// Store translated pages in memory (auto-cleanup after 30 min)
+const translatedPages = new Map();
+
+function storePage(html) {
+  const id = crypto.randomBytes(8).toString("hex");
+  translatedPages.set(id, html);
+  setTimeout(() => translatedPages.delete(id), 30 * 60 * 1000);
+  return id;
+}
+
+// Serve translated page directly (not as blob)
+app.get("/view/:id", (req, res) => {
+  const html = translatedPages.get(req.params.id);
+  if (!html) return res.status(404).send("Page expired or not found");
+  res.set("Content-Type", "text/html; charset=utf-8");
+  res.send(html);
+});
 
 // Reusable browser instance
 let browserInstance = null;
@@ -69,7 +88,7 @@ async function batchTranslate(texts, targetLang = "ne") {
 // Make relative URLs absolute
 function makeAbsolute(href, baseUrl) {
   if (!href) return href;
-  if (href.startsWith("data:")) return href;
+  if (href.startsWith("data:") || href.startsWith("javascript:") || href.startsWith("#")) return href;
   try {
     return new URL(href, baseUrl).href;
   } catch {
@@ -77,8 +96,7 @@ function makeAbsolute(href, baseUrl) {
   }
 }
 
-// Image proxy endpoint - fetches images on behalf of the client
-// to bypass referer/origin checks
+// Image proxy endpoint
 app.get("/api/proxy-image", async (req, res) => {
   const imageUrl = req.query.url;
   if (!imageUrl) return res.status(400).send("Missing url param");
@@ -96,13 +114,38 @@ app.get("/api/proxy-image", async (req, res) => {
       maxRedirects: 5,
     });
 
-    const contentType =
-      response.headers["content-type"] || "image/jpeg";
+    const contentType = response.headers["content-type"] || "image/jpeg";
     res.set("Content-Type", contentType);
     res.set("Cache-Control", "public, max-age=86400");
     res.send(Buffer.from(response.data));
   } catch (err) {
     res.status(502).send("Failed to fetch image");
+  }
+});
+
+// General resource proxy (for CSS, JS, etc.)
+app.get("/api/proxy", async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send("Missing url param");
+
+  try {
+    const response = await axios.get(targetUrl, {
+      responseType: "arraybuffer",
+      timeout: 15000,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Referer: new URL(targetUrl).origin + "/",
+      },
+      maxRedirects: 5,
+    });
+
+    const contentType = response.headers["content-type"] || "application/octet-stream";
+    res.set("Content-Type", contentType);
+    res.set("Cache-Control", "public, max-age=86400");
+    res.send(Buffer.from(response.data));
+  } catch (err) {
+    res.status(502).send("Failed to fetch resource");
   }
 });
 
@@ -122,22 +165,19 @@ app.post("/api/translate", async (req, res) => {
     const browser = await getBrowser();
     page = await browser.newPage();
 
-    // Set viewport and user agent
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
 
-    // Navigate and wait for network to settle
     await page.goto(siteUrl, {
       waitUntil: "domcontentloaded",
       timeout: 120000,
     });
 
-    // Wait a bit more for dynamic content
     await new Promise((r) => setTimeout(r, 3000));
 
-    // Scroll down to trigger lazy-loaded images
+    // Scroll to trigger lazy-loaded images
     console.log("[2/4] Scrolling to load lazy images...");
     await page.evaluate(async () => {
       const distance = 600;
@@ -159,7 +199,6 @@ app.post("/api/translate", async (req, res) => {
 
     await new Promise((r) => setTimeout(r, 1500));
 
-    // Get the fully rendered HTML
     const renderedHtml = await page.content();
     await page.close();
     page = null;
@@ -168,59 +207,65 @@ app.post("/api/translate", async (req, res) => {
     const $ = cheerio.load(renderedHtml);
     const baseUrl = siteUrl;
 
-    // Remove all existing scripts (they won't work out of context anyway)
-    $("script").remove();
-
-    // Fix resource URLs to absolute
-    $("link[href]").each((_, el) => {
-      $(el).attr("href", makeAbsolute($(el).attr("href"), baseUrl));
+    // Proxy external scripts (keep them working)
+    $("script[src]").each((_, el) => {
+      const src = $(el).attr("src");
+      if (src) {
+        const absSrc = makeAbsolute(src, baseUrl);
+        if (absSrc && !absSrc.startsWith("data:")) {
+          $(el).attr("src", `${serverOrigin}/api/proxy?url=${encodeURIComponent(absSrc)}`);
+        }
+      }
     });
 
-    // Proxy all images through our server
+    // Proxy CSS links
+    $("link[rel='stylesheet'][href], link[type='text/css'][href]").each((_, el) => {
+      const href = $(el).attr("href");
+      if (href) {
+        const absHref = makeAbsolute(href, baseUrl);
+        if (absHref && !absHref.startsWith("data:")) {
+          $(el).attr("href", `${serverOrigin}/api/proxy?url=${encodeURIComponent(absHref)}`);
+        }
+      }
+    });
+
+    // Other link tags (favicon etc.) - make absolute
+    $("link:not([rel='stylesheet']):not([type='text/css'])").each((_, el) => {
+      const href = $(el).attr("href");
+      if (href) {
+        $(el).attr("href", makeAbsolute(href, baseUrl));
+      }
+    });
+
+    // Proxy all images
     $("img").each((_, el) => {
       const src = $(el).attr("src");
       if (src) {
         const absoluteSrc = makeAbsolute(src, baseUrl);
         if (absoluteSrc && !absoluteSrc.startsWith("data:")) {
-          $(el).attr(
-            "src",
-            `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absoluteSrc)}`
-          );
+          $(el).attr("src", `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absoluteSrc)}`);
         }
       }
-      // Handle data-src (lazy load attribute)
       const dataSrc = $(el).attr("data-src");
       if (dataSrc) {
         const absoluteDataSrc = makeAbsolute(dataSrc, baseUrl);
         if (absoluteDataSrc && !absoluteDataSrc.startsWith("data:")) {
-          $(el).attr(
-            "src",
-            `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absoluteDataSrc)}`
-          );
+          $(el).attr("src", `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absoluteDataSrc)}`);
+          $(el).attr("data-src", `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absoluteDataSrc)}`);
         }
-        $(el).removeAttr("data-src");
       }
-      // Handle srcset
       const srcset = $(el).attr("srcset");
       if (srcset) {
-        const newSrcset = srcset
-          .split(",")
-          .map((s) => {
-            const parts = s.trim().split(/\s+/);
-            const absSrc = makeAbsolute(parts[0], baseUrl);
-            parts[0] = `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absSrc)}`;
-            return parts.join(" ");
-          })
-          .join(", ");
+        const newSrcset = srcset.split(",").map((s) => {
+          const parts = s.trim().split(/\s+/);
+          const absSrc = makeAbsolute(parts[0], baseUrl);
+          parts[0] = `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absSrc)}`;
+          return parts.join(" ");
+        }).join(", ");
         $(el).attr("srcset", newSrcset);
       }
-      // Remove lazy-load classes that might hide images
       const classes = $(el).attr("class") || "";
-      $(el).attr(
-        "class",
-        classes.replace(/\blazy\b/g, "").replace(/\blazyload\b/g, "")
-      );
-      // Ensure loading is eager
+      $(el).attr("class", classes.replace(/\blazy\b/g, "").replace(/\blazyload\b/g, ""));
       $(el).attr("loading", "eager");
     });
 
@@ -228,16 +273,13 @@ app.post("/api/translate", async (req, res) => {
     $("source").each((_, el) => {
       const srcset = $(el).attr("srcset");
       if (srcset) {
-        const newSrcset = srcset
-          .split(",")
-          .map((s) => {
-            const parts = s.trim().split(/\s+/);
-            const absSrc = makeAbsolute(parts[0], baseUrl);
-            if (absSrc.startsWith("data:")) return s;
-            parts[0] = `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absSrc)}`;
-            return parts.join(" ");
-          })
-          .join(", ");
+        const newSrcset = srcset.split(",").map((s) => {
+          const parts = s.trim().split(/\s+/);
+          const absSrc = makeAbsolute(parts[0], baseUrl);
+          if (absSrc.startsWith("data:")) return s;
+          parts[0] = `${serverOrigin}/api/proxy-image?url=${encodeURIComponent(absSrc)}`;
+          return parts.join(" ");
+        }).join(", ");
         $(el).attr("srcset", newSrcset);
       }
     });
@@ -258,19 +300,11 @@ app.post("/api/translate", async (req, res) => {
       $(el).attr("href", makeAbsolute($(el).attr("href"), baseUrl));
     });
 
-    // Add base tag
+    // Add base tag for any remaining relative URLs
     $("head").prepend(`<base href="${baseUrl}">`);
 
-    // Collect text nodes to translate
-    const skipTags = new Set([
-      "script",
-      "style",
-      "noscript",
-      "code",
-      "pre",
-      "svg",
-      "math",
-    ]);
+    // Collect text nodes to translate (skip script/style)
+    const skipTags = new Set(["script", "style", "noscript", "code", "pre", "svg", "math"]);
     const textNodes = [];
 
     function walkNodes(nodes) {
@@ -301,13 +335,11 @@ app.post("/api/translate", async (req, res) => {
       }
     });
 
-    // Translate title
     const title = $("title").text();
     if (title.trim()) {
       $("title").text(await translateText(title));
     }
 
-    // Translate alt attributes
     for (const el of $("img[alt]").toArray()) {
       const alt = $(el).attr("alt");
       if (alt && alt.trim()) {
@@ -315,7 +347,6 @@ app.post("/api/translate", async (req, res) => {
       }
     }
 
-    // Translate placeholder attributes
     for (const el of $("[placeholder]").toArray()) {
       const ph = $(el).attr("placeholder");
       if (ph && ph.trim()) {
@@ -325,20 +356,21 @@ app.post("/api/translate", async (req, res) => {
 
     $("html").attr("lang", "ne");
 
+    // Store translated HTML and return view URL
+    const pageId = storePage($.html());
+    const viewUrl = `${serverOrigin}/view/${pageId}`;
+
     console.log("[4/4] Done!");
-    res.json({ html: $.html() });
+    res.json({ viewUrl });
   } catch (err) {
     console.error("Error:", err.message);
     if (page) {
       try { await page.close(); } catch {}
     }
-    res
-      .status(500)
-      .json({ error: `Failed to fetch or translate: ${err.message}` });
+    res.status(500).json({ error: `Failed to fetch or translate: ${err.message}` });
   }
 });
 
-// Cleanup on exit
 process.on("SIGINT", async () => {
   if (browserInstance) await browserInstance.close();
   process.exit();
